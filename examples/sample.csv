@@ -1,0 +1,6 @@
+date,start,end,project
+2026-09-14,09:00,17:30,acme-website
+2026-09-15,08:45,12:00,acme-website
+2026-09-15,12:30,18:00,internal-tools
+2026-09-16,22:00,05:00,oncall
+2026-09-17,09:00,09:00,acme-website

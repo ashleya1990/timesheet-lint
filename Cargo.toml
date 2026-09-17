@@ -1,0 +1,8 @@
+[package]
+name = "timesheet-lint"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "timesheet-lint"
+path = "src/main.rs"
