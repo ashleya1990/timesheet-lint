@@ -39,6 +39,7 @@ Current checks:
 
 - malformed rows (wrong field count, bad date, bad time)
 - end time not after start time
+- overlapping shifts on the same date, across rows
 - shifts longer than 16 hours (warning)
 - empty project field (warning)
 
@@ -46,12 +47,16 @@ Shifts that cross midnight (end time earlier than start time on the same
 line) are currently flagged as an error rather than understood as spanning
 two days — see the roadmap below.
 
+Overlap checking only considers rows whose own start/end already passed
+the basic time checks; a row with an invalid range is reported for that
+on its own and left out of the overlap comparison.
+
 ## Building
 
 Standard `cargo build` / `cargo test`, no external crates.
 
 ## Status
 
-Early skeleton. The rule set above is deliberately small; see the roadmap
-in the issue tracker for what's planned next, starting with detecting
-overlapping shifts across multiple rows for the same date.
+Early skeleton. The rule set above is deliberately small; next up is
+teaching it to understand shifts that cross midnight instead of rejecting
+them outright.

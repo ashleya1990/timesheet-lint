@@ -43,6 +43,7 @@ struct Entry {
 
 fn lint(contents: &str) -> Vec<Finding> {
     let mut findings = Vec::new();
+    let mut entries: Vec<(usize, Entry)> = Vec::new();
 
     for (idx, raw_line) in contents.lines().enumerate() {
         let line_no = idx + 1;
@@ -55,7 +56,10 @@ fn lint(contents: &str) -> Vec<Finding> {
             continue;
         }
         match parse_entry(line) {
-            Ok(entry) => check_entry(line_no, &entry, &mut findings),
+            Ok(entry) => {
+                check_entry(line_no, &entry, &mut findings);
+                entries.push((line_no, entry));
+            }
             Err(message) => findings.push(Finding {
                 line: line_no,
                 severity: Severity::Error,
@@ -64,7 +68,47 @@ fn lint(contents: &str) -> Vec<Finding> {
         }
     }
 
+    check_overlaps(&entries, &mut findings);
+    // Per-row checks land in line order already, but overlap findings are appended
+    // after the fact and can point at an earlier line than whatever was checked last.
+    findings.sort_by_key(|f| f.line);
     findings
+}
+
+// Compares every pair of entries sharing a date and flags ranges that intersect.
+// Entries with an invalid range (end <= start) are skipped here since check_entry
+// already reported them and a bad range has no meaningful overlap to report.
+fn check_overlaps(entries: &[(usize, Entry)], findings: &mut Vec<Finding>) {
+    for i in 0..entries.len() {
+        let (line_a, a) = &entries[i];
+        if a.end_minutes <= a.start_minutes {
+            continue;
+        }
+        for (line_b, b) in &entries[i + 1..] {
+            if b.date != a.date || b.end_minutes <= b.start_minutes {
+                continue;
+            }
+            if a.start_minutes < b.end_minutes && b.start_minutes < a.end_minutes {
+                findings.push(Finding {
+                    line: *line_b,
+                    severity: Severity::Error,
+                    message: format!(
+                        "shift {}-{} overlaps with the shift on line {} ({}-{}) on {}",
+                        format_time(b.start_minutes),
+                        format_time(b.end_minutes),
+                        line_a,
+                        format_time(a.start_minutes),
+                        format_time(a.end_minutes),
+                        a.date
+                    ),
+                });
+            }
+        }
+    }
+}
+
+fn format_time(minutes: u32) -> String {
+    format!("{:02}:{:02}", minutes / 60, minutes % 60)
 }
 
 fn parse_entry(line: &str) -> Result<Entry, String> {
@@ -290,6 +334,34 @@ mod tests {
                 name: "second data row keeps the correct line number",
                 input: "date,start,end,project\n2026-09-18,09:00,17:00,acme\n2026-09-19,25:00,17:00,acme\n",
                 expected: &[(3, Severity::Error, "hour 25 is out of range")],
+            },
+            Case {
+                name: "overlapping shifts on the same date are flagged",
+                input: "date,start,end,project\n2026-09-18,09:00,17:00,acme\n2026-09-18,16:00,18:00,other\n",
+                expected: &[(3, Severity::Error, "overlaps with the shift on line 2")],
+            },
+            Case {
+                name: "back-to-back shifts that only touch at the boundary do not overlap",
+                input: "date,start,end,project\n2026-09-18,09:00,17:00,acme\n2026-09-18,17:00,18:00,other\n",
+                expected: &[],
+            },
+            Case {
+                name: "same times on different dates do not overlap",
+                input: "date,start,end,project\n2026-09-18,09:00,17:00,acme\n2026-09-19,09:00,17:00,acme\n",
+                expected: &[],
+            },
+            Case {
+                name: "a zero-length shift is not treated as overlapping the next one",
+                input: "date,start,end,project\n2026-09-18,09:00,09:00,acme\n2026-09-18,09:00,17:00,acme\n",
+                expected: &[(2, Severity::Error, "end time is not after start time")],
+            },
+            Case {
+                name: "an overlap finding sorts before a later parse error on a higher line",
+                input: "date,start,end,project\n2026-09-18,09:00,17:00,acme\n2026-09-18,16:00,18:00,other\n2026-09-19,25:00,17:00,acme\n",
+                expected: &[
+                    (3, Severity::Error, "overlaps with the shift on line 2"),
+                    (4, Severity::Error, "hour 25 is out of range"),
+                ],
             },
         ];
 
