@@ -27,8 +27,7 @@ date,start,end,project
 
 ```
 $ timesheet-lint examples/sample.csv
-examples/sample.csv:5: error: end time is not after start time on 2026-09-17 (shifts crossing midnight are not supported yet)
-examples/sample.csv:4: error: end time is not after start time on 2026-09-16 (shifts crossing midnight are not supported yet)
+examples/sample.csv:6: error: start and end time are both 09:00 on 2026-09-17, a zero-length shift
 ```
 
 Findings are printed as `path:line: severity: message`. The process exits
@@ -38,18 +37,18 @@ or none at all, and 2 if the file couldn't be read.
 Current checks:
 
 - malformed rows (wrong field count, bad date, bad time)
-- end time not after start time
-- overlapping shifts on the same date, across rows
+- zero-length shifts (start equal to end)
+- overlapping shifts, across rows, including an overnight shift running into
+  the next day's rows
 - shifts longer than 16 hours (warning)
 - empty project field (warning)
 
-Shifts that cross midnight (end time earlier than start time on the same
-line) are currently flagged as an error rather than understood as spanning
-two days — see the roadmap below.
+An end time earlier than the start time is read as a shift that crosses
+midnight and ends on the following day, so `22:00,05:00` is a 7 hour shift.
+Equal start and end times are never read as a 24 hour shift.
 
-Overlap checking only considers rows whose own start/end already passed
-the basic time checks; a row with an invalid range is reported for that
-on its own and left out of the overlap comparison.
+Overlap checking leaves out zero-length rows; those are reported on their
+own.
 
 ## Building
 
@@ -57,6 +56,5 @@ Standard `cargo build` / `cargo test`, no external crates.
 
 ## Status
 
-Early skeleton. The rule set above is deliberately small; next up is
-teaching it to understand shifts that cross midnight instead of rejecting
-them outright.
+Early. The rule set above is deliberately small. Next up is a JSON output
+mode for CI, then a configurable shift length limit.

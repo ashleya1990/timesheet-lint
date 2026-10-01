@@ -34,11 +34,37 @@ impl fmt::Display for Finding {
     }
 }
 
+const MINUTES_PER_DAY: u32 = 24 * 60;
+
 struct Entry {
     date: String,
+    // Days since 1970-01-01, so shifts on different dates can be placed on one timeline.
+    day: i64,
     start_minutes: u32,
     end_minutes: u32,
     project: String,
+}
+
+impl Entry {
+    // An end time earlier than the start time means the shift runs past midnight into
+    // the next day. Equal times are a zero-length shift, not a 24 hour one.
+    fn duration(&self) -> Option<u32> {
+        if self.end_minutes == self.start_minutes {
+            None
+        } else if self.end_minutes > self.start_minutes {
+            Some(self.end_minutes - self.start_minutes)
+        } else {
+            Some(MINUTES_PER_DAY - self.start_minutes + self.end_minutes)
+        }
+    }
+
+    // Start and end as minutes since the epoch day, so an overnight shift can be
+    // compared against the next day's rows.
+    fn absolute_range(&self) -> Option<(i64, i64)> {
+        let duration = self.duration()? as i64;
+        let start = self.day * MINUTES_PER_DAY as i64 + self.start_minutes as i64;
+        Some((start, start + duration))
+    }
 }
 
 fn lint(contents: &str) -> Vec<Finding> {
@@ -75,31 +101,33 @@ fn lint(contents: &str) -> Vec<Finding> {
     findings
 }
 
-// Compares every pair of entries sharing a date and flags ranges that intersect.
-// Entries with an invalid range (end <= start) are skipped here since check_entry
-// already reported them and a bad range has no meaningful overlap to report.
+// Compares every pair of entries on a shared timeline and flags ranges that intersect.
+// Comparing across dates is what catches an overnight shift running into the next
+// day's first shift. Zero-length entries are skipped since check_entry already
+// reported them and they have no meaningful overlap to report.
 fn check_overlaps(entries: &[(usize, Entry)], findings: &mut Vec<Finding>) {
     for i in 0..entries.len() {
         let (line_a, a) = &entries[i];
-        if a.end_minutes <= a.start_minutes {
+        let Some((a_start, a_end)) = a.absolute_range() else {
             continue;
-        }
+        };
         for (line_b, b) in &entries[i + 1..] {
-            if b.date != a.date || b.end_minutes <= b.start_minutes {
+            let Some((b_start, b_end)) = b.absolute_range() else {
                 continue;
-            }
-            if a.start_minutes < b.end_minutes && b.start_minutes < a.end_minutes {
+            };
+            if a_start < b_end && b_start < a_end {
                 findings.push(Finding {
                     line: *line_b,
                     severity: Severity::Error,
                     message: format!(
-                        "shift {}-{} overlaps with the shift on line {} ({}-{}) on {}",
+                        "shift {} {}-{} overlaps with the shift on line {} ({} {}-{})",
+                        b.date,
                         format_time(b.start_minutes),
                         format_time(b.end_minutes),
                         line_a,
+                        a.date,
                         format_time(a.start_minutes),
                         format_time(a.end_minutes),
-                        a.date
                     ),
                 });
             }
@@ -121,39 +149,52 @@ fn parse_entry(line: &str) -> Result<Entry, String> {
     }
     let (date, start, end, project) = (fields[0], fields[1], fields[2], fields[3]);
 
-    if !is_valid_date(date) {
+    let Some((year, month, day)) = parse_date(date) else {
         return Err(format!("'{date}' is not a valid date (expected YYYY-MM-DD)"));
-    }
+    };
     let start_minutes = parse_time(start).map_err(|e| format!("start time '{start}': {e}"))?;
     let end_minutes = parse_time(end).map_err(|e| format!("end time '{end}': {e}"))?;
 
     Ok(Entry {
         date: date.to_string(),
+        day: days_from_civil(year, month, day),
         start_minutes,
         end_minutes,
         project: project.to_string(),
     })
 }
 
-fn is_valid_date(date: &str) -> bool {
+fn parse_date(date: &str) -> Option<(i64, u32, u32)> {
     let parts: Vec<&str> = date.split('-').collect();
     if parts.len() != 3 {
-        return false;
+        return None;
     }
     let (y, m, d) = (parts[0], parts[1], parts[2]);
     if y.len() != 4 || m.len() != 2 || d.len() != 2 {
-        return false;
+        return None;
     }
     if !y.chars().all(|c| c.is_ascii_digit()) {
-        return false;
+        return None;
     }
-    let Ok(month) = m.parse::<u32>() else {
-        return false;
-    };
-    let Ok(day) = d.parse::<u32>() else {
-        return false;
-    };
-    (1..=12).contains(&month) && (1..=31).contains(&day)
+    let year = y.parse::<i64>().ok()?;
+    let month = m.parse::<u32>().ok()?;
+    let day = d.parse::<u32>().ok()?;
+    if (1..=12).contains(&month) && (1..=31).contains(&day) {
+        Some((year, month, day))
+    } else {
+        None
+    }
+}
+
+// Days since 1970-01-01 in the proleptic Gregorian calendar (Hinnant's algorithm).
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let shifted_month = if month > 2 { month - 3 } else { month + 9 } as i64;
+    let doy = (153 * shifted_month + 2) / 5 + day as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
 }
 
 fn parse_time(value: &str) -> Result<u32, String> {
@@ -177,19 +218,19 @@ fn parse_time(value: &str) -> Result<u32, String> {
 }
 
 fn check_entry(line_no: usize, entry: &Entry, findings: &mut Vec<Finding>) {
-    if entry.end_minutes <= entry.start_minutes {
+    let Some(duration) = entry.duration() else {
         findings.push(Finding {
             line: line_no,
             severity: Severity::Error,
             message: format!(
-                "end time is not after start time on {} (shifts crossing midnight are not supported yet)",
+                "start and end time are both {} on {}, a zero-length shift",
+                format_time(entry.start_minutes),
                 entry.date
             ),
         });
         return;
-    }
+    };
 
-    let duration = entry.end_minutes - entry.start_minutes;
     if duration > MAX_SHIFT_MINUTES {
         findings.push(Finding {
             line: line_no,
@@ -308,12 +349,42 @@ mod tests {
             Case {
                 name: "end equal to start is a zero-length shift",
                 input: "date,start,end,project\n2026-09-18,09:00,09:00,acme\n",
-                expected: &[(2, Severity::Error, "end time is not after start time")],
+                expected: &[(2, Severity::Error, "zero-length shift")],
             },
             Case {
-                name: "end before start is rejected, not read as crossing midnight",
+                name: "end before start is read as crossing midnight",
+                input: "date,start,end,project\n2026-09-18,22:00,05:00,oncall\n",
+                expected: &[],
+            },
+            Case {
+                name: "overnight shift of exactly 16 hours is fine",
                 input: "date,start,end,project\n2026-09-18,17:00,09:00,acme\n",
-                expected: &[(2, Severity::Error, "end time is not after start time")],
+                expected: &[],
+            },
+            Case {
+                name: "overnight shift one minute past 16 hours warns",
+                input: "date,start,end,project\n2026-09-18,17:00,09:01,acme\n",
+                expected: &[(2, Severity::Warning, "longer than the 16 hour")],
+            },
+            Case {
+                name: "overnight shift overlaps the next day's early shift",
+                input: "date,start,end,project\n2026-09-18,22:00,05:00,oncall\n2026-09-19,04:00,08:00,acme\n",
+                expected: &[(3, Severity::Error, "overlaps with the shift on line 2")],
+            },
+            Case {
+                name: "overnight shift ending when the next day's shift starts does not overlap",
+                input: "date,start,end,project\n2026-09-18,22:00,05:00,oncall\n2026-09-19,05:00,08:00,acme\n",
+                expected: &[],
+            },
+            Case {
+                name: "overnight shift across a month and year boundary",
+                input: "date,start,end,project\n2026-12-31,22:00,03:00,oncall\n2027-01-01,02:00,06:00,acme\n",
+                expected: &[(3, Severity::Error, "overlaps with the shift on line 2")],
+            },
+            Case {
+                name: "overnight shift does not overlap a shift the following evening",
+                input: "date,start,end,project\n2026-09-18,22:00,05:00,oncall\n2026-09-19,09:00,17:00,acme\n",
+                expected: &[],
             },
             Case {
                 name: "shift exactly at the 16 hour limit is fine",
@@ -353,7 +424,7 @@ mod tests {
             Case {
                 name: "a zero-length shift is not treated as overlapping the next one",
                 input: "date,start,end,project\n2026-09-18,09:00,09:00,acme\n2026-09-18,09:00,17:00,acme\n",
-                expected: &[(2, Severity::Error, "end time is not after start time")],
+                expected: &[(2, Severity::Error, "zero-length shift")],
             },
             Case {
                 name: "an overlap finding sorts before a later parse error on a higher line",
